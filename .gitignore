@@ -1,0 +1,5 @@
+bin
+gen
+proguard
+.settings
+/src/net/binzume/android/whereissaifu/Constants.java
