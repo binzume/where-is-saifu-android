@@ -1,5 +1,9 @@
 package net.binzume.android.whereissaifu;
 
+import android.app.AlarmManager;
+import android.app.Notification;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
@@ -9,6 +13,7 @@ import android.bluetooth.BluetoothGattCharacteristic;
 import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothProfile;
+import android.content.Context;
 import android.content.Intent;
 import android.location.Location;
 import android.location.LocationManager;
@@ -16,6 +21,7 @@ import android.os.AsyncTask;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.PowerManager;
+import android.os.SystemClock;
 import android.util.Log;
 
 public class SaifuUpdateService extends Service {
@@ -29,6 +35,7 @@ public class SaifuUpdateService extends Service {
 
 	@Override
 	public void onCreate() {
+		setPollingInterval(600);
 		super.onCreate();
 	}
 
@@ -47,6 +54,7 @@ public class SaifuUpdateService extends Service {
 					@Override
 					public void run() {
 						if (!found) {
+							notifyMessage("Saifu status update: LOST");
 							new AsyncTask<Void, Void, Void>() {
 								@Override
 								protected Void doInBackground(Void... params) {
@@ -72,8 +80,10 @@ public class SaifuUpdateService extends Service {
 					gatt.writeCharacteristic(characteristic);
 				}
 				if ("close".equals(intent.getAction())) {
+					setPollingInterval(0);
 					gatt.disconnect();
 					gatt = null;
+					stopSelf();
 				}
 				if ("poll".equals(intent.getAction())) {
 					readRssi();
@@ -95,7 +105,8 @@ public class SaifuUpdateService extends Service {
 			handler.postDelayed(new Runnable() {
 				@Override
 				public void run() {
-					if (!found) {
+					if (lastRssi == 0) {
+						notifyMessage("Saifu status update: LOST rssi");
 						new AsyncTask<Void, Void, Void>() {
 							@Override
 							protected Void doInBackground(Void... params) {
@@ -120,6 +131,38 @@ public class SaifuUpdateService extends Service {
 		}
 	}
 
+	private void setPollingInterval(int interval) {
+		AlarmManager alarmManager = (AlarmManager)getSystemService(ALARM_SERVICE);
+		Intent intent = new Intent(getApplicationContext(), SaifuUpdateService.class);
+		intent.setAction("poll");
+		PendingIntent pendingIntent = PendingIntent.getService(getApplicationContext(), 0, intent, PendingIntent.FLAG_UPDATE_CURRENT);
+		Log.d("ChatActivity",  "interval: " + interval);
+		if (interval > 0) {
+			long t = interval * 1000;
+			alarmManager.setRepeating(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + t, t, pendingIntent);
+		} else {
+			alarmManager.cancel(pendingIntent);
+		}
+	}
+
+	@SuppressWarnings("deprecation")
+	public void notifyMessage(String message) {
+		NotificationManager notificationManager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+
+		Notification notification = new Notification();
+		notification.icon = R.drawable.ic_launcher;
+		// notification.when = notificationTime;
+		notification.tickerText = message;
+		notification.flags |= Notification.FLAG_AUTO_CANCEL;
+
+		Intent intent = new Intent(this, MainActivity.class);
+		intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
+		PendingIntent contentIntent = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT);
+		notification.setLatestEventInfo(this, "Choco Chats", notification.tickerText, contentIntent);
+		notificationManager.notify(100, notification);
+	}
+
+	
 	private void find() {
 		final BluetoothManager bluetoothManager = (BluetoothManager) getSystemService(BLUETOOTH_SERVICE);
 
