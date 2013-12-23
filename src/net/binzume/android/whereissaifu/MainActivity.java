@@ -1,8 +1,11 @@
 package net.binzume.android.whereissaifu;
 
+import com.google.android.gcm.GCMRegistrar;
+
 import android.app.Activity;
 import android.content.Intent;
 import android.os.Bundle;
+import android.util.Log;
 import android.view.Menu;
 import android.view.View;
 
@@ -48,7 +51,16 @@ public class MainActivity extends Activity {
 				startService(intent);
 			}
 		});
-
+		
+		
+		GCMRegistrar.checkDevice(this);
+		GCMRegistrar.checkManifest(this);
+		final String regId = GCMRegistrar.getRegistrationId(this);
+		if ("".equals(regId)) {
+		  GCMRegistrar.register(this, Constants.GCM_SENDER_ID);
+		} else {
+		  Log.d("saifu", "Already registered:" + regId);
+		}
 	}
 
 	@Override

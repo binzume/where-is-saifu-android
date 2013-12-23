@@ -5,5 +5,6 @@ public class Constants {
 	public static final String API_URL = "http://api.binzume.net/saifu/";
 	public static final String API_KEY = "*****************"; // API update key
 	public static final String BT_ADDR = "44:13:19:**:**:**"; // LBT-VRU01 Addr
+	public static final String GCM_SENDER_ID = "*******************";
 
 }
