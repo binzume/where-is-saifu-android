@@ -26,7 +26,13 @@ public class GCMIntentService extends GCMBaseIntentService {
 		Log.d("saifu", "GCM onMessage" + intent.getStringExtra("message"));
 		if (MESSAGE_SCAN.equals(intent.getStringExtra("message"))) {
 			Log.d("saifu", "GCM MESSAGE_SCAN");
-			Intent serviceIntent = new Intent(context, SaifuUpdateService.class);
+			{
+				Intent serviceIntent = new Intent(context, SaifuUpdateService.class);
+				serviceIntent.setAction("close");
+			//	startService(serviceIntent);
+			}
+
+            Intent serviceIntent = new Intent(context, SaifuUpdateService.class);
 			serviceIntent.setAction("scan");
             context.startService(serviceIntent);
 		}

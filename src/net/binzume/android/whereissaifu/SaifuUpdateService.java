@@ -1,5 +1,8 @@
 package net.binzume.android.whereissaifu;
 
+import java.util.HashMap;
+import java.util.LinkedList;
+
 import android.app.AlarmManager;
 import android.app.Notification;
 import android.app.NotificationManager;
@@ -7,35 +10,35 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
-import android.bluetooth.BluetoothGatt;
-import android.bluetooth.BluetoothGattCallback;
-import android.bluetooth.BluetoothGattCharacteristic;
-import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothManager;
-import android.bluetooth.BluetoothProfile;
 import android.content.Context;
 import android.content.Intent;
 import android.location.Location;
 import android.location.LocationManager;
 import android.os.AsyncTask;
+import android.os.Binder;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.PowerManager;
 import android.os.SystemClock;
 import android.util.Log;
 
-public class SaifuUpdateService extends Service {
+public class SaifuUpdateService extends Service implements BLETagDevice.TagDeviceEventListener {
 
-	private final String addr = Constants.BT_ADDR;
-	private BluetoothGatt gatt = null;
 	private Handler handler = new Handler();
-	private BluetoothGattCharacteristic characteristic;
-	private long lastRssi = 0;
-	private boolean connected = false;
-	private boolean connecting = false;
-
-	private final static int RECONNECT_WAIT = 5000;
-	private final static int CONNECT_TIMEOUT = 10000;
+	private final String addr = Constants.BT_ADDR;
+	private boolean resetAdapter = false;
+	private boolean disabled = false;
+	private BLETagDevice currentDevice;
+	
+	private final HashMap<String, BLETagDevice> devices = new HashMap<String, BLETagDevice>();
+	final LinkedList<LocationHistory> histories = new LinkedList<LocationHistory>();
+	
+	public class SaifuStatusBinder extends Binder {
+		public boolean connected() {
+			return currentDevice != null && currentDevice.isConnected();
+		}
+	}
 
 	@Override
 	public void onCreate() {
@@ -44,24 +47,40 @@ public class SaifuUpdateService extends Service {
 	}
 
 	@Override
+	public void onDestroy() {
+		terminate();
+		super.onDestroy();
+	}
+
+	@Override
 	public IBinder onBind(Intent intent) {
-		return null;
+		return new SaifuStatusBinder();
+	}
+	
+	private void sendStatus() {
+		Intent intent = new Intent("saifu_status");
+		boolean connected = currentDevice != null && currentDevice.isConnected();
+		String deviceName = currentDevice != null ? currentDevice.name : "";
+		String addr = currentDevice != null ? currentDevice.addr : "";
+		int lastRssi = currentDevice != null ? currentDevice.lastRssi : 0;
+		intent.putExtra("connected", connected);
+		intent.putExtra("name", deviceName);
+		intent.putExtra("addr", addr);
+		intent.putExtra("rssi", lastRssi);
+		sendBroadcast(intent);
 	}
 
 	@Override
 	public int onStartCommand(Intent intent, int flags, int startId) {
 		if (intent != null && "close".equals(intent.getAction())) {
-			BluetoothGatt g = gatt;
-			gatt = null;
-			connected = false;
-			connecting = false;
-			if (g != null) {
-				g.disconnect();
-				g.close();
-			}
-			setPollingInterval(0);
+			disabled = false;
+			terminate();
 			stopSelf();
 			return START_NOT_STICKY;
+		}
+		if (intent != null && "tellStatus".equals(intent.getAction())) {
+			sendStatus();
+			return START_STICKY;
 		}
 		
 		if (intent != null &&  "scan".equals(intent.getAction())) {
@@ -69,32 +88,60 @@ public class SaifuUpdateService extends Service {
 				private int count = 0;
 				@Override
 				public void run() {
-					Log.d("saifu", "requested scanning....");
-		            startService(new Intent(SaifuUpdateService.this, SaifuUpdateService.class));
-					if (count++ < 10 && !connected) {
-						handler.postDelayed(this, 30000);
+					if (!(currentDevice == null || !currentDevice.isConnected())) {
+						Log.d("saifu", "requested scanning....");
+						terminate();
+						handler.postDelayed(new Runnable() {
+							@Override
+							public void run() {
+								startService(new Intent(SaifuUpdateService.this, SaifuUpdateService.class));
+							}
+						}, 1000);
+					}
+					// Reset BT Adapter
+					if (count++ < 10 && !(currentDevice != null && currentDevice.isConnected()) && resetAdapter) {
+						handler.postDelayed(new Runnable() {
+							@Override
+							public void run() {
+								if (!(currentDevice != null && currentDevice.isConnected())) {
+									final BluetoothManager bluetoothManager = (BluetoothManager) getSystemService(BLUETOOTH_SERVICE);
+									final BluetoothAdapter bluetoothAdapter = bluetoothManager.getAdapter();
+									bluetoothAdapter.disable();
+								}
+							}
+						}, 33000);
+						handler.postDelayed(new Runnable() {
+							@Override
+							public void run() {
+								final BluetoothManager bluetoothManager = (BluetoothManager) getSystemService(BLUETOOTH_SERVICE);
+								final BluetoothAdapter bluetoothAdapter = bluetoothManager.getAdapter();
+								if (!bluetoothAdapter.isEnabled()) {
+									bluetoothAdapter.enable();
+								}
+							}
+						}, 35000);
+						handler.postDelayed(this, 40000);
 					}
 					
 				}
-			},45000);
+			},30000);
 		}
 		if (intent != null &&  "found".equals(intent.getAction())) {
 			notifyMessage("Saifu OK");
 			return START_STICKY;
 		}
 
-		if (!connected && !connecting) {
-			find();
-		} else if (gatt != null && intent != null) {
+		if (currentDevice == null || currentDevice.getConnectState() == BLETagDevice.CONNECT_STATE_DISCONNECTED) {
+			if (intent != null && "poll".equals(intent.getAction())) {
+				disabled = false;
+			}
+			if (!disabled) {
+				find();
+			}
+		} else if (currentDevice != null && currentDevice.isConnected()) {
 			Log.d("saifu", "action:" + intent.getAction());
-			if (characteristic != null && "alert".equals(intent.getAction())) {
-				Log.d("saifu", "GATT write Characteristic!");
-				characteristic.setValue(new byte[] { 0x02 });
-				gatt.writeCharacteristic(characteristic);
-			} else if ("stop".equals(intent.getAction())) {
-				Log.d("saifu", "GATT write Characteristic!");
-				characteristic.setValue(new byte[] { 0x00 });
-				gatt.writeCharacteristic(characteristic);
+			if ("alert".equals(intent.getAction())) {
+				currentDevice.setAlarm(intent.getIntExtra("value", 0));
 			} else if ("poll".equals(intent.getAction())) {
 				readRssi();
 			} else {
@@ -105,16 +152,16 @@ public class SaifuUpdateService extends Service {
 	}
 
 	private void readRssi() {
-		if (!connected || gatt == null)
+		if (currentDevice == null || !currentDevice.isConnected())
 			return;
 		PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
 		final PowerManager.WakeLock wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Whereis");
 		wl.acquire(2000);
-		lastRssi = 0;
+		currentDevice.lastRssi = 0;
 		handler.postDelayed(new Runnable() {
 			@Override
 			public void run() {
-				if (lastRssi == 0) {
+				if (currentDevice != null && currentDevice.lastRssi == 0) {
 					notifyMessage("Saifu status update: LOST rssi");
 					new AsyncTask<Void, Void, Void>() {
 						@Override
@@ -130,12 +177,20 @@ public class SaifuUpdateService extends Service {
 		handler.postDelayed(new Runnable() {
 			@Override
 			public void run() {
-				if (lastRssi != 0) {
+				if (currentDevice != null && currentDevice.lastRssi != 0) {
 					wl.release();
 				}
 			}
 		}, 500);
-		gatt.readRemoteRssi();
+		currentDevice.readRemoteRssi();
+	}
+	
+	private void terminate() {
+		Log.d("saifu", "terminate....");
+		if (currentDevice != null) {
+			currentDevice.disconnect();
+		}
+		setPollingInterval(0);
 	}
 
 	private void setPollingInterval(int interval) {
@@ -172,7 +227,8 @@ public class SaifuUpdateService extends Service {
 	}
 
 	private void find() {
-		connecting = true;
+		// connecting = true;
+		currentDevice = null;
 
 		final BluetoothManager bluetoothManager = (BluetoothManager) getSystemService(BLUETOOTH_SERVICE);
 
@@ -216,7 +272,7 @@ public class SaifuUpdateService extends Service {
 				public void run() {
 					Log.d("saifu", "stopLeScan");
 					bluetoothAdapter.stopLeScan(callback);
-					if (gatt == null) {
+					if (currentDevice == null) {
 						Log.d("saifu", "not respond. try direct connect");
 						BluetoothDevice device = bluetoothAdapter.getRemoteDevice(addr);
 						if (device != null) {
@@ -229,149 +285,56 @@ public class SaifuUpdateService extends Service {
 	}
 
 	private void connect(BluetoothDevice device) {
-		gatt = device.connectGatt(this, false, new BluetoothGattCallback() {
+		BLETagDevice dd = devices.get(device.getAddress());
+		if (dd == null) {
+			dd = new BLETagDevice(device.getAddress());
+		}
+		currentDevice = dd;
+		currentDevice.setListener(this);
+		dd.connect(device, handler, this);
+	}
+
+
+	@Override
+	public void onStatusUpdated(final BLETagDevice d, int st) {
+		sendStatus();
+		if (st == 1) {
+			LocationManager locationManager = (LocationManager) getSystemService(LOCATION_SERVICE);
+			final Location location = locationManager.getLastKnownLocation(LocationManager.PASSIVE_PROVIDER);
+			if (location != null) {
+				Log.d("saifu", "Location latlon:" + location.getLatitude() + "," + location.getLongitude() + " acc:" + location.getAccuracy());
+				
+				// histories.add(new LocationHistory(location.getLatitude(), location.getLongitude(), System.currentTimeMillis(), null));
+
+				new AsyncTask<Void, Void, Void>() {
+
+					@Override
+					protected Void doInBackground(Void... params) {
+						new LocationApiClient().updateLocaton(location.getLatitude(), location.getLongitude(), location.getAccuracy(), d.lastRssi);
+						return null;
+					}
+				}.execute();
+			}
 			
-			private int state = 0;
-			private static final int STATE_DISCOVER = 1;
-			private static final int STATE_OK = 0;
-			
-
-			@Override
-			public void onCharacteristicRead(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, int status) {
-				if (characteristic.getValue().length > 0) {
-					Log.d("saifu", "onCharacteristicRead " + characteristic.getValue()[0]);
-				}
-				super.onCharacteristicRead(gatt, characteristic, status);
-			}
-
-			@Override
-			public void onCharacteristicChanged(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic) {
-				if (characteristic.getValue().length > 0) {
-					Log.d("saifu", "onCharacteristicChanged " + characteristic.getValue());
-				}
-				super.onCharacteristicChanged(gatt, characteristic);
-			}
-
-			@Override
-			public void onConnectionStateChange(final BluetoothGatt gatt, int status, int newState) {
-				super.onConnectionStateChange(gatt, status, newState);
-				if (status != 0)
-					return;
-				if (newState == BluetoothProfile.STATE_CONNECTED) {
-					state = STATE_DISCOVER;
-					handler.postDelayed(new Runnable() {
-						private int c = 0;
-						public void run() {
-							if (c++ < 5 && state == STATE_DISCOVER) {
-								gatt.discoverServices();
-								handler.postDelayed(this, 1000); // retry after.
-							}
-						}
-					}, 300);
-					SaifuUpdateService.this.gatt = gatt;
-					connecting = false;
-					connected = true;
-					Log.d("saifu", "Connected");
-				} else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-					if (SaifuUpdateService.this.gatt == gatt) {
-						SaifuUpdateService.this.gatt = null;
-					}
-					if (connected) {
-						// reconnect
-						handler.postDelayed(new Runnable() {
-							public void run() {
-								Log.d("saifu", "Reconnecting...");
-								connect(gatt);
-							}
-						}, RECONNECT_WAIT);
-					}
-					connecting = false;
-					connected = false;
-					Log.d("saifu", "Disconnected");
-				}
-			}
-
-			@Override
-			public void onReadRemoteRssi(BluetoothGatt gatt, final int rssi, int status) {
-				super.onReadRemoteRssi(gatt, rssi, status);
-				state = STATE_OK;
-				LocationManager locationManager = (LocationManager) getSystemService(LOCATION_SERVICE);
-				final Location location = locationManager.getLastKnownLocation(LocationManager.PASSIVE_PROVIDER);
-				if (location != null) {
-					Log.d("saifu", "Location latlon:" + location.getLatitude() + "," + location.getLongitude() + " acc:" + location.getAccuracy());
-
-					new AsyncTask<Void, Void, Void>() {
-
-						@Override
-						protected Void doInBackground(Void... params) {
-							new LocationApiClient().updateLocaton(location.getLatitude(), location.getLongitude(), location.getAccuracy(), rssi);
-							return null;
-						}
-					}.execute();
-				}
-
-				Log.d("saifu", "GATT " + gatt.getDevice().getName() + " rssi: " + rssi + " t" + +System.currentTimeMillis());
-				lastRssi = rssi;
-			}
-
-			@Override
-			public void onServicesDiscovered(BluetoothGatt gatt, int status) {
-				super.onServicesDiscovered(gatt, status);
-				state = STATE_OK;
-				// TODO Auto-generated method stub
-				for (BluetoothGattService s : gatt.getServices()) {
-					Log.d("saifu", "GATT s:" + s.getUuid().toString());
-					for (BluetoothGattCharacteristic c : s.getCharacteristics()) {
-						Log.d("saifu", "GATT   c:" + c.getUuid());
-						if ("00001802-0000-1000-8000-00805f9b34fb".equals(s.getUuid().toString())) {
-							if ("00002a06-0000-1000-8000-00805f9b34fb".equals(c.getUuid().toString())) {
-								characteristic = c;
-							}
-						}
-						if ("00002a19-0000-1000-8000-00805f9b34fb".equals(c.getUuid().toString())) {
-							gatt.setCharacteristicNotification(c, true);
-							gatt.readCharacteristic(c);
-						}
-					}
-				}
-				gatt.readRemoteRssi();
-			}
-		});
-		if (gatt != null && connected == false) {
-			connect(gatt);
-		} else {
-			connecting = false;
 		}
 	}
 
-	private void connect(final BluetoothGatt gatt) {
-		Log.d("saifu", "Connecting...");
-		connected = false;
-		connecting = true;
-		gatt.connect();
+	@Override
+	public void onPressButton(BLETagDevice d, int st) {
+		// TODO Auto-generated method stub
+		
+	}
 
-		handler.postDelayed(new Runnable() {
-			public void run() {
-				if (connecting) {
-					Log.d("saifu", "Coonnect timeout");
-					gatt.disconnect();
-					SaifuUpdateService.this.gatt = null;
-					connected = false;
-					connecting = false;
-
-					if (lastRssi != 0) {
-						lastRssi = 0;
-						notifyMessage("Saifu status update: LOST");
-						new AsyncTask<Void, Void, Void>() {
-							@Override
-							protected Void doInBackground(Void... params) {
-								new LocationApiClient().updateStatus("lost");
-								return null;
-							}
-						}.execute();
-					}
-				}
+	@Override
+	public void onLost(BLETagDevice d) {
+		notifyMessage("Saifu status update: LOST");
+		Log.d("saifu", "Saifu status update: LOST");
+		new AsyncTask<Void, Void, Void>() {
+			@Override
+			protected Void doInBackground(Void... params) {
+				new LocationApiClient().updateStatus("lost");
+				return null;
 			}
-		}, CONNECT_TIMEOUT);
+		}.execute();
 	}
 }
