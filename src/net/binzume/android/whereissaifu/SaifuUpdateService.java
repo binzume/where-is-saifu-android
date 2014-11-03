@@ -1,6 +1,5 @@
 package net.binzume.android.whereissaifu;
 
-import java.util.HashMap;
 import java.util.LinkedList;
 
 import android.app.AlarmManager;
@@ -26,12 +25,10 @@ import android.util.Log;
 public class SaifuUpdateService extends Service implements BLETagDevice.TagDeviceEventListener {
 
 	private Handler handler = new Handler();
-	private final String addr = Constants.BT_ADDR;
 	private boolean resetAdapter = false;
 	private boolean disabled = false;
-	private BLETagDevice currentDevice;
+	private BLETagDevice currentDevice = new BLETagDevice(Constants.BT_ADDR);
 	
-	private final HashMap<String, BLETagDevice> devices = new HashMap<String, BLETagDevice>();
 	final LinkedList<LocationHistory> histories = new LinkedList<LocationHistory>();
 	
 	public class SaifuStatusBinder extends Binder {
@@ -57,16 +54,10 @@ public class SaifuUpdateService extends Service implements BLETagDevice.TagDevic
 		return new SaifuStatusBinder();
 	}
 	
-	private void sendStatus() {
-		Intent intent = new Intent("saifu_status");
-		boolean connected = currentDevice != null && currentDevice.isConnected();
-		String deviceName = currentDevice != null ? currentDevice.name : "";
-		String addr = currentDevice != null ? currentDevice.addr : "";
-		int lastRssi = currentDevice != null ? currentDevice.lastRssi : 0;
-		intent.putExtra("connected", connected);
-		intent.putExtra("name", deviceName);
-		intent.putExtra("addr", addr);
-		intent.putExtra("rssi", lastRssi);
+	private void sendStatus(BLETagDevice d) {
+		Intent intent = new Intent("bletag_status");
+		intent.putExtra("device", d);
+		intent.putExtra("addr", d.addr);
 		sendBroadcast(intent);
 	}
 
@@ -79,7 +70,7 @@ public class SaifuUpdateService extends Service implements BLETagDevice.TagDevic
 			return START_NOT_STICKY;
 		}
 		if (intent != null && "tellStatus".equals(intent.getAction())) {
-			sendStatus();
+			sendStatus(currentDevice);
 			return START_STICKY;
 		}
 		
@@ -228,7 +219,6 @@ public class SaifuUpdateService extends Service implements BLETagDevice.TagDevic
 
 	private void find() {
 		// connecting = true;
-		currentDevice = null;
 
 		final BluetoothManager bluetoothManager = (BluetoothManager) getSystemService(BLUETOOTH_SERVICE);
 
@@ -242,7 +232,8 @@ public class SaifuUpdateService extends Service implements BLETagDevice.TagDevic
 		boolean ok = false;
 		for (BluetoothDevice device : bluetoothAdapter.getBondedDevices()) {
 			Log.d("saifu", "Bonded " + device.getName());
-			if ("LBT-VRU01".equals(device.getName())) {
+			//if ("LBT-VRU01".equals(device.getName())) {
+			if (currentDevice.addr.equalsIgnoreCase(device.getAddress()) && !ok) {
 				connect(device);
 				ok = true;
 			}
@@ -257,7 +248,7 @@ public class SaifuUpdateService extends Service implements BLETagDevice.TagDevic
 				@Override
 				public void onLeScan(BluetoothDevice device, int rssi, byte[] scanRecord) {
 					Log.d("saifu", "Scan " + device.getName() + " addr:" + device.getAddress() + " rssi: " + rssi);
-					if (addr.equalsIgnoreCase(device.getAddress()) && !found) {
+					if (currentDevice.addr.equalsIgnoreCase(device.getAddress()) && !found) {
 						found = true;
 						bluetoothAdapter.stopLeScan(this);
 						connect(device);
@@ -272,9 +263,9 @@ public class SaifuUpdateService extends Service implements BLETagDevice.TagDevic
 				public void run() {
 					Log.d("saifu", "stopLeScan");
 					bluetoothAdapter.stopLeScan(callback);
-					if (currentDevice == null) {
+					if (currentDevice.getConnectState() == BLETagDevice.CONNECT_STATE_DISCONNECTED) {
 						Log.d("saifu", "not respond. try direct connect");
-						BluetoothDevice device = bluetoothAdapter.getRemoteDevice(addr);
+						BluetoothDevice device = bluetoothAdapter.getRemoteDevice(currentDevice.addr);
 						if (device != null) {
 							connect(device);
 						}
@@ -285,19 +276,14 @@ public class SaifuUpdateService extends Service implements BLETagDevice.TagDevic
 	}
 
 	private void connect(BluetoothDevice device) {
-		BLETagDevice dd = devices.get(device.getAddress());
-		if (dd == null) {
-			dd = new BLETagDevice(device.getAddress());
-		}
-		currentDevice = dd;
 		currentDevice.setListener(this);
-		dd.connect(device, handler, this);
+		currentDevice.connect(device, handler, this);
 	}
 
 
 	@Override
 	public void onStatusUpdated(final BLETagDevice d, int st) {
-		sendStatus();
+		sendStatus(d);
 		if (st == 1) {
 			LocationManager locationManager = (LocationManager) getSystemService(LOCATION_SERVICE);
 			final Location location = locationManager.getLastKnownLocation(LocationManager.PASSIVE_PROVIDER);
@@ -320,9 +306,30 @@ public class SaifuUpdateService extends Service implements BLETagDevice.TagDevic
 	}
 
 	@Override
-	public void onPressButton(BLETagDevice d, int st) {
-		// TODO Auto-generated method stub
+	public void onPressButton(final BLETagDevice d, int st) {
+		Intent intent = new Intent("button_pressed");
+		intent.putExtra("device", d);
+		intent.putExtra("addr", d.addr);
+		intent.putExtra("st", st);
+		sendBroadcast(intent);
 		
+		if (st == 1) {
+
+			PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+			@SuppressWarnings("deprecation")
+			final PowerManager.WakeLock wl = pm.newWakeLock(PowerManager.SCREEN_DIM_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP, "Whereis");
+			wl.acquire(2000);
+
+			LocationManager locationManager = (LocationManager) getSystemService(LOCATION_SERVICE);
+			final Location location = locationManager.getLastKnownLocation(LocationManager.PASSIVE_PROVIDER);
+			new AsyncTask<Void, Void, Void>() {
+				@Override
+				protected Void doInBackground(Void... params) {
+					new LocationApiClient().updateLocaton(location.getLatitude(), location.getLongitude(), location.getAccuracy(), d.lastRssi);
+					return null;
+				}
+			}.execute();
+		}
 	}
 
 	@Override

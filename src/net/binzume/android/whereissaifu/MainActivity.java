@@ -80,6 +80,12 @@ public class MainActivity extends Activity {
 		}
 	}
 
+	private void update(BLETagDevice d) {
+		((TextView) findViewById(R.id.NameText)).setText(d.addr);
+		((TextView) findViewById(R.id.NameText)).setText("ADDR:" + d.addr + " (" + d.name + ")");
+		((TextView) findViewById(R.id.StatusText)).setText(d.isConnected() ? "Connected " + d.lastRssi : "Disconnected");
+		((TextView) findViewById(R.id.StatusText)).setTextColor(d.isConnected() ? Color.GREEN : Color.RED);
+	}
 
 	@Override
 	protected void onStart() {
@@ -91,16 +97,22 @@ public class MainActivity extends Activity {
 		receiver = new BroadcastReceiver() {
 			@Override
 			public void onReceive(Context context, Intent intent) {
-				if ("saifu_status".equals(intent.getAction())) {
-					boolean connected = intent.getBooleanExtra("connected", false);
-					((TextView)findViewById(R.id.NameText)).setText("Dev:" + intent.getStringExtra("name") + " ADDR:" + intent.getStringExtra("addr"));
-					((TextView)findViewById(R.id.StatusText)).setText(connected ? "Connected " + intent.getIntExtra("rssi", 0): "Disconnected");
-					((TextView)findViewById(R.id.StatusText)).setTextColor(connected ? Color.GREEN : Color.RED);
+				if ("bletag_status".equals(intent.getAction())) {
+					BLETagDevice d = (BLETagDevice) intent.getSerializableExtra("device");
+					update(d);
+				}
+				if ("button_pressed".equals(intent.getAction())) {
+					BLETagDevice d = (BLETagDevice) intent.getSerializableExtra("device");
+					update(d);
+					if (intent.getIntExtra("st", 0) != 0) {
+						((TextView) findViewById(R.id.StatusText)).setTextColor(Color.BLUE);
+					}
 				}
 			}
 		};
 		IntentFilter filter = new IntentFilter();
-		filter.addAction("saifu_status");
+		filter.addAction("bletag_status");
+		filter.addAction("button_pressed");
 		registerReceiver(receiver, filter);
 		
 		Intent intent = new Intent(getApplicationContext(), SaifuUpdateService.class);
